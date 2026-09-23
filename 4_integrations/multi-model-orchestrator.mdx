@@ -1,0 +1,297 @@
+---
+title: Multi-Model Orchestrator
+description: Combine multiple local LM Studio models into one assistant response.
+index: 6
+---
+
+import { Step, Steps } from "fumadocs-ui/components/steps";
+
+Run several local models through LM Studio, give each one a role, and merge their outputs into one final answer.
+
+This pattern is useful when you want one assistant experience, but you want different models to contribute different strengths such as factual recall, coding help, and review or safety checks.
+
+<Callout type="info" title="Important">
+Keep model access separate from data access. Let your controller app read approved SQL or file context, then pass only the needed results to the models.
+</Callout>
+
+## Recommended architecture
+
+1. Run your models locally in LM Studio.
+2. Use one local controller app as the orchestration layer.
+3. Send the same user request to three worker models.
+4. Ask a fourth pass, or one of the same models, to merge the worker outputs into one final answer.
+5. Keep SQL, cloud, and file-system access in the controller instead of giving direct access to each model.
+
+## Model roles
+
+Example role split:
+
+- **@eagle ai**: factual answer
+- **Model 2**: coding and technical answer
+- **Model 3**: review, safety, or cleanup answer
+- **Judge model**: merges the three drafts into one response
+
+## Setup
+
+<Steps>
+  <Step>
+    <h3>Start LM Studio's local server</h3>
+
+    Start LM Studio's API server on the default port:
+
+    ```bash
+    lms server start --port 1234
+    ```
+  </Step>
+
+  <Step>
+    <h3>Load the models you want to orchestrate</h3>
+
+    Load the worker models and a judge model in LM Studio, or rely on just-in-time loading.
+
+    If you only want three models total, you can reuse one of the worker models as the judge.
+  </Step>
+
+  <Step>
+    <h3>Create one controller app</h3>
+
+    The controller owns:
+
+    - the model list
+    - role prompts
+    - allowed file paths
+    - approved SQL queries
+    - logging and conflict handling
+  </Step>
+</Steps>
+
+## Example controller config
+
+```json title="orchestrator-config.json"
+{
+  "base_url": "http://localhost:1234/v1",
+  "api_key": "lm-studio",
+  "judge_model": "openai/gpt-oss-20b",
+  "worker_models": [
+    {
+      "label": "@eagle ai",
+      "model": "openai/gpt-oss-20b",
+      "role": "Answer for correctness and factual grounding."
+    },
+    {
+      "label": "@builder ai",
+      "model": "ibm/granite-4-micro",
+      "role": "Answer for code, architecture, and implementation details."
+    },
+    {
+      "label": "@review ai",
+      "model": "qwen/qwen3-4b-thinking-2507",
+      "role": "Answer as a reviewer. Catch risks, missing steps, and unsafe assumptions."
+    }
+  ],
+  "allowed_paths": [
+    "/srv/dev-drive/projects",
+    "/srv/volume-drive/shared",
+    "/mnt/virtual-drive/context"
+  ],
+  "approved_queries": {
+    "active_customers": "SELECT TOP 20 name, tier FROM dbo.customers ORDER BY updated_at DESC",
+    "recent_tickets": "SELECT TOP 20 id, title, status FROM dbo.tickets ORDER BY created_at DESC"
+  }
+}
+```
+
+Use `label` when you want a friendly assistant identity such as `@eagle ai` while still targeting the real LM Studio model identifier in the `model` field.
+
+LM Studio does not require authentication by default on localhost. If you enable API auth, add your `Authorization` header in the controller.
+
+## Python starter
+
+This example uses the OpenAI-compatible endpoint exposed by LM Studio. The controller fans out to three worker models, then asks a judge model to produce one final answer.
+
+```python title="ensemble_controller.py"
+import json
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import requests
+
+
+CONFIG = {
+    "base_url": "http://localhost:1234/v1",
+    "api_key": "lm-studio",
+    "judge_model": "openai/gpt-oss-20b",
+    "worker_models": [
+        {
+            "label": "@eagle ai",
+            "model": "openai/gpt-oss-20b",
+            "role": "Answer for correctness and factual grounding.",
+        },
+        {
+            "label": "@builder ai",
+            "model": "ibm/granite-4-micro",
+            "role": "Answer for code, architecture, and implementation details.",
+        },
+        {
+            "label": "@review ai",
+            "model": "qwen/qwen3-4b-thinking-2507",
+            "role": "Answer as a reviewer. Catch risks, missing steps, and unsafe assumptions.",
+        },
+    ],
+    "allowed_paths": [
+        "/srv/dev-drive/projects",
+        "/srv/volume-drive/shared",
+        "/mnt/virtual-drive/context",
+    ],
+}
+
+
+def chat_completion(model: str, system_prompt: str, user_prompt: str) -> str:
+    response = requests.post(
+        f"{CONFIG['base_url']}/chat/completions",
+        headers={"Content-Type": "application/json"},
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.3,
+        },
+        timeout=120,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
+
+
+def read_allowed_files(paths: list[str]) -> str:
+    allowed_roots = [Path(root).resolve() for root in CONFIG["allowed_paths"]]
+    chunks = []
+    for raw_path in paths:
+        candidate = Path(raw_path).resolve()
+        if not any(root == candidate or root in candidate.parents for root in allowed_roots):
+            raise ValueError(f"Path not allowed: {candidate}")
+        if candidate.is_file():
+            chunks.append(f"## File: {candidate}\n{candidate.read_text(encoding='utf-8')[:4000]}")
+    return "\n\n".join(chunks)
+
+
+def get_sql_context() -> str:
+    # Replace this stub with your own approved SQL runner.
+    # Keep credentials and connection strings outside this file.
+    return ""
+
+
+def build_context(file_paths: list[str]) -> str:
+    file_context = read_allowed_files(file_paths) if file_paths else ""
+    sql_context = get_sql_context()
+    parts = [part for part in [file_context, sql_context] if part]
+    return "\n\n".join(parts)
+
+
+def run_worker(worker: dict[str, str], prompt: str, shared_context: str) -> dict[str, str]:
+    label = worker.get("label", worker["model"])
+    system_prompt = (
+        "You are one member of a local model ensemble. "
+        f"{worker['role']} "
+        "Return a concise draft answer. Do not mention the ensemble."
+    )
+    user_prompt = prompt if not shared_context else f"{prompt}\n\nContext:\n{shared_context}"
+    draft = chat_completion(worker["model"], system_prompt, user_prompt)
+    return {
+        "label": label,
+        "model": worker["model"],
+        "role": worker["role"],
+        "draft": draft,
+    }
+
+
+def merge_drafts(prompt: str, drafts: list[dict[str, str]]) -> str:
+    worker_notes = "\n\n".join(
+        [
+            f"Label: {draft['label']}\nModel: {draft['model']}\nRole: {draft['role']}\nDraft:\n{draft['draft']}"
+            for draft in drafts
+        ]
+    )
+    system_prompt = (
+        "You combine multiple local model drafts into one answer. "
+        "Resolve disagreements, keep the strongest parts, and return one final reply."
+    )
+    user_prompt = (
+        f"User request:\n{prompt}\n\n"
+        f"Worker drafts:\n{worker_notes}\n\n"
+        "Return one answer in a single voice. If the drafts conflict, choose the most "
+        "defensible answer and briefly note uncertainty only when needed."
+    )
+    return chat_completion(CONFIG["judge_model"], system_prompt, user_prompt)
+
+
+def answer(prompt: str, file_paths: list[str] | None = None) -> str:
+    shared_context = build_context(file_paths or [])
+    with ThreadPoolExecutor(max_workers=len(CONFIG["worker_models"])) as executor:
+        drafts = list(
+            executor.map(
+                lambda worker: run_worker(worker, prompt, shared_context),
+                CONFIG["worker_models"],
+            )
+        )
+    return merge_drafts(prompt, drafts)
+
+
+if __name__ == "__main__":
+    prompt = "Summarize the current architecture and suggest the next implementation step."
+    print(answer(prompt))
+```
+
+## Adding SQL Server and file access safely
+
+Recommended pattern:
+
+- Run approved SQL queries in the controller, not in the model process.
+- Keep credentials in environment variables or your local secrets manager.
+- Restrict file access to explicit allowlisted paths.
+- Pass only the relevant query results or file snippets into the prompt context.
+
+If you want the model to call tools dynamically, use [MCP via API](/docs/developer/core/mcp) or your own tool-calling controller layer.
+
+## `@eagle ai` config pattern
+
+If you want the final assistant to expose named contributors, keep the display name in `label` and the actual LM Studio target in `model`.
+
+```json title="worker-model entry"
+{
+  "label": "@eagle ai",
+  "model": "openai/gpt-oss-20b",
+  "role": "Answer for correctness and factual grounding."
+}
+```
+
+This lets your controller log or debug with `@eagle ai` while still sending requests to the real local model identifier.
+
+## Merge strategies
+
+You can use any of these strategies:
+
+1. **Judge model**: gather three drafts, then synthesize one final answer.
+2. **Best-of-three**: score drafts with rules and select one.
+3. **Consensus merge**: extract common points from the drafts and compose a final answer.
+
+The judge model pattern is usually the easiest to understand and extend.
+
+## Conflict handling
+
+When worker models disagree:
+
+- prefer the answer backed by the strongest evidence in your provided context
+- keep the final response in one voice
+- include a short confidence note only if the disagreement matters
+
+## Next steps
+
+- Add logging for prompts, drafts, and final merged answers
+- Add named SQL queries instead of free-form SQL
+- Add per-model timeout and fallback rules
+- Add a debug mode that shows each worker draft before synthesis
+
+If you're running into trouble, hop onto our [Discord](https://discord.gg/lmstudio)
