@@ -63,6 +63,14 @@ Example role split:
     - approved SQL queries
     - logging and conflict handling
   </Step>
+
+  <Step>
+    <h3>Install the Python dependency for the starter script</h3>
+
+    ```bash
+    pip install requests
+    ```
+  </Step>
 </Steps>
 
 ## Example controller config
@@ -164,7 +172,7 @@ def chat_completion(model: str, system_prompt: str, user_prompt: str) -> str:
 
 
 def read_allowed_files(paths: list[str]) -> str:
-    allowed_roots = [Path(root).resolve(strict=False) for root in CONFIG["allowed_paths"]]
+    allowed_roots = [Path(root).resolve(strict=True) for root in CONFIG["allowed_paths"]]
     chunks = []
     for raw_path in paths:
         candidate = Path(raw_path)
