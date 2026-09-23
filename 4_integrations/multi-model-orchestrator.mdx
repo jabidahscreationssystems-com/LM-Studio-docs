@@ -70,7 +70,6 @@ Example role split:
 ```json title="orchestrator-config.json"
 {
   "base_url": "http://localhost:1234/v1",
-  "api_key": "lm-studio",
   "judge_model": "openai/gpt-oss-20b",
   "worker_models": [
     {
@@ -119,7 +118,6 @@ import requests
 
 CONFIG = {
     "base_url": "http://localhost:1234/v1",
-    "api_key": "lm-studio",
     "judge_model": "openai/gpt-oss-20b",
     "worker_models": [
         {
@@ -228,6 +226,8 @@ def merge_drafts(prompt: str, drafts: list[dict[str, str]]) -> str:
 
 
 def answer(prompt: str, file_paths: list[str] | None = None) -> str:
+    if not CONFIG["worker_models"]:
+        raise ValueError("CONFIG['worker_models'] must contain at least one model.")
     shared_context = build_context(file_paths or [])
     with ThreadPoolExecutor(max_workers=len(CONFIG["worker_models"])) as executor:
         drafts = list(
