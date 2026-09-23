@@ -109,7 +109,6 @@ LM Studio does not require authentication by default on localhost. If you enable
 This example uses the OpenAI-compatible endpoint exposed by LM Studio. The controller fans out to three worker models, then asks a judge model to produce one final answer.
 
 ```python title="ensemble_controller.py"
-import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -164,12 +163,27 @@ def chat_completion(model: str, system_prompt: str, user_prompt: str) -> str:
 
 
 def read_allowed_files(paths: list[str]) -> str:
-    allowed_roots = [Path(root).resolve() for root in CONFIG["allowed_paths"]]
+    allowed_roots = [Path(root).absolute() for root in CONFIG["allowed_paths"]]
     chunks = []
     for raw_path in paths:
-        candidate = Path(raw_path).resolve()
-        if not any(root == candidate or root in candidate.parents for root in allowed_roots):
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = (Path.cwd() / candidate).absolute()
+        else:
+            candidate = candidate.absolute()
+        matching_root = next(
+            (root for root in allowed_roots if root == candidate or root in candidate.parents),
+            None,
+        )
+        if matching_root is None:
             raise ValueError(f"Path not allowed: {candidate}")
+        current = candidate
+        while True:
+            if current.is_symlink():
+                raise ValueError(f"Symlinked paths are not allowed: {candidate}")
+            if current == matching_root:
+                break
+            current = current.parent
         if candidate.is_file():
             chunks.append(f"## File: {candidate}\n{candidate.read_text(encoding='utf-8')[:4000]}")
     return "\n\n".join(chunks)
