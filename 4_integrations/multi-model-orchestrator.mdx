@@ -170,11 +170,15 @@ def read_allowed_files(paths: list[str]) -> str:
         candidate = Path(raw_path)
         if not candidate.is_absolute():
             candidate = Path.cwd() / candidate
-        candidate = candidate.resolve(strict=False)
+        if not candidate.exists():
+            raise ValueError(f"Path does not exist: {candidate}")
+        candidate = candidate.resolve(strict=True)
         if not any(root == candidate or root in candidate.parents for root in allowed_roots):
             raise ValueError(f"Path not allowed: {candidate}")
         if candidate.is_file():
-            chunks.append(f"## File: {candidate}\n{candidate.read_text(encoding='utf-8')[:4000]}")
+            with candidate.open("r", encoding="utf-8") as handle:
+                snippet = handle.read(4000)
+            chunks.append(f"## File: {candidate}\n{snippet}")
     return "\n\n".join(chunks)
 
 
@@ -252,7 +256,8 @@ Recommended pattern:
 - Restrict file access to explicit allowlisted paths.
 - Pass only the relevant query results or file snippets into the prompt context.
 
-If you want the model to call tools dynamically, use [MCP via API](/docs/developer/core/mcp) or your own tool-calling controller layer.
+If you want the model to call tools dynamically, use the
+[Using MCP via API](/docs/developer/core/mcp) guide or your own tool-calling controller layer.
 
 ## `@eagle ai` config pattern
 
