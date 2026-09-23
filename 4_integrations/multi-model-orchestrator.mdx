@@ -110,6 +110,7 @@ This example uses the OpenAI-compatible endpoint exposed by LM Studio. The contr
 
 ```python title="ensemble_controller.py"
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import requests
@@ -163,27 +164,15 @@ def chat_completion(model: str, system_prompt: str, user_prompt: str) -> str:
 
 
 def read_allowed_files(paths: list[str]) -> str:
-    allowed_roots = [Path(root).absolute() for root in CONFIG["allowed_paths"]]
+    allowed_roots = [Path(root).resolve(strict=False) for root in CONFIG["allowed_paths"]]
     chunks = []
     for raw_path in paths:
         candidate = Path(raw_path)
         if not candidate.is_absolute():
-            candidate = (Path.cwd() / candidate).absolute()
-        else:
-            candidate = candidate.absolute()
-        matching_root = next(
-            (root for root in allowed_roots if root == candidate or root in candidate.parents),
-            None,
-        )
-        if matching_root is None:
+            candidate = Path.cwd() / candidate
+        candidate = candidate.resolve(strict=False)
+        if not any(root == candidate or root in candidate.parents for root in allowed_roots):
             raise ValueError(f"Path not allowed: {candidate}")
-        current = candidate
-        while True:
-            if current.is_symlink():
-                raise ValueError(f"Symlinked paths are not allowed: {candidate}")
-            if current == matching_root:
-                break
-            current = current.parent
         if candidate.is_file():
             chunks.append(f"## File: {candidate}\n{candidate.read_text(encoding='utf-8')[:4000]}")
     return "\n\n".join(chunks)
@@ -243,13 +232,9 @@ def answer(prompt: str, file_paths: list[str] | None = None) -> str:
     if not CONFIG["worker_models"]:
         raise ValueError("CONFIG['worker_models'] must contain at least one model.")
     shared_context = build_context(file_paths or [])
+    worker_runner = partial(run_worker, prompt=prompt, shared_context=shared_context)
     with ThreadPoolExecutor(max_workers=len(CONFIG["worker_models"])) as executor:
-        drafts = list(
-            executor.map(
-                lambda worker: run_worker(worker, prompt, shared_context),
-                CONFIG["worker_models"],
-            )
-        )
+        drafts = list(executor.map(worker_runner, CONFIG["worker_models"]))
     return merge_drafts(prompt, drafts)
 
 
